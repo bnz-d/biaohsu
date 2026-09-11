@@ -6,7 +6,7 @@ import { AppSwitch, MarkdownEditor, MarkdownFullscreenViewer, MarkdownRenderer, 
 import { OUTLINE_CONTENT_MODE_LABELS } from '../../../shared/types';
 import type { ClientConfig, ImageModelStatus, OutlineContentMode, OutlineData, OutlineItem, OutlineWordControlOptions } from '../../../shared/types';
 import { countReadableWords } from '../../../shared/utils/wordCount';
-import type { BackgroundTaskState, ConsistencyRepairMode, ContentGenerationOptions, ContentGenerationSectionStatus, ContentGenerationSections, ContentIllustrationKind, ContentIllustrationPlanState, ContentTableRequirement, OriginalPlanCoverageRepairMode, TechnicalPlanWorkflowKind } from '../types';
+import type { BackgroundTaskState, ConsistencyRepairMode, ContentGenerationOptions, ContentGenerationSectionStatus, ContentGenerationSections, ContentIllustrationKind, ContentIllustrationPlanState, ContentTableRequirement, OriginalPlanCoverageRepairMode, TechnicalDeviationTableMode, TechnicalPlanWorkflowKind } from '../types';
 import type { ExportFormatConfig } from '../../../shared/types/exportFormat';
 import { DEFAULT_EXPORT_FORMAT } from '../../../shared/types/exportFormat';
 import { buildExportFormatCssVars } from '../../../shared/utils/exportFormatCss';
@@ -67,6 +67,11 @@ const tableRequirementOptions: Array<{ value: ContentTableRequirement; label: st
   { value: 'heavy', label: '大量' },
 ];
 
+const technicalDeviationTableModeOptions: Array<{ value: TechnicalDeviationTableMode; label: string }> = [
+  { value: 'source-first', label: '优先使用招标文件原表（推荐）' },
+  { value: 'standard', label: '使用系统标准表格' },
+];
+
 const consistencyRepairModeOptions: Array<{ value: ConsistencyRepairMode; label: string }> = [
   { value: 'agent', label: 'Agent 修复（推荐）' },
   { value: 'normal', label: '普通修复' },
@@ -113,6 +118,7 @@ const defaultContentGenerationOptions: ContentGenerationOptions = {
   maxHtmlImages: 10,
   htmlImageTypes: DEFAULT_HTML_IMAGE_TYPES,
   tableRequirement: 'heavy',
+  technicalDeviationTableMode: 'source-first',
   enableConsistencyAudit: true,
   consistencyRepairMode: 'agent',
   enableOriginalPlanCoverageAudit: false,
@@ -121,6 +127,10 @@ const defaultContentGenerationOptions: ContentGenerationOptions = {
 
 function isContentTableRequirement(value: unknown): value is ContentTableRequirement {
   return tableRequirementOptions.some((option) => option.value === value);
+}
+
+function isTechnicalDeviationTableMode(value: unknown): value is TechnicalDeviationTableMode {
+  return technicalDeviationTableModeOptions.some((option) => option.value === value);
 }
 
 function isConsistencyRepairMode(value: unknown): value is ConsistencyRepairMode {
@@ -149,6 +159,7 @@ function normalizeGenerationOptions(options: ContentGenerationOptions | undefine
   const requestedMaxMermaidImages = Number(options?.maxMermaidImages ?? fallback.maxMermaidImages);
   const requestedMaxHtmlImages = Number(options?.maxHtmlImages ?? fallback.maxHtmlImages);
   const tableRequirement = options?.tableRequirement;
+  const technicalDeviationTableMode = options?.technicalDeviationTableMode;
 
   return {
     useAiImages: Boolean(options?.useAiImages ?? fallback.useAiImages) && imageModelAvailable,
@@ -159,6 +170,7 @@ function normalizeGenerationOptions(options: ContentGenerationOptions | undefine
     maxHtmlImages: Math.max(0, Math.min(Number.isFinite(requestedMaxHtmlImages) ? Math.round(requestedMaxHtmlImages) : fallback.maxHtmlImages, maxAiImagesLimit)),
     htmlImageTypes: String(options?.htmlImageTypes ?? fallback.htmlImageTypes),
     tableRequirement: isContentTableRequirement(tableRequirement) ? tableRequirement : fallback.tableRequirement,
+    technicalDeviationTableMode: isTechnicalDeviationTableMode(technicalDeviationTableMode) ? technicalDeviationTableMode : fallback.technicalDeviationTableMode,
     enableConsistencyAudit: Boolean(options?.enableConsistencyAudit ?? fallback.enableConsistencyAudit),
     consistencyRepairMode: isConsistencyRepairMode(options?.consistencyRepairMode) ? options.consistencyRepairMode : fallback.consistencyRepairMode,
     enableOriginalPlanCoverageAudit: isExpansionWorkflow ? Boolean(options?.enableOriginalPlanCoverageAudit ?? fallback.enableOriginalPlanCoverageAudit) : false,
@@ -831,6 +843,7 @@ function ContentEditPage({
         maxHtmlImages: savedGenerationOptions.maxHtmlImages,
         htmlImageTypes: savedGenerationOptions.htmlImageTypes,
         tableRequirement: savedGenerationOptions.tableRequirement,
+        technicalDeviationTableMode: savedGenerationOptions.technicalDeviationTableMode,
         enableConsistencyAudit: savedGenerationOptions.enableConsistencyAudit,
         consistencyRepairMode: savedGenerationOptions.consistencyRepairMode,
         enableOriginalPlanCoverageAudit: isExpansionWorkflow && savedGenerationOptions.enableOriginalPlanCoverageAudit,
@@ -901,6 +914,7 @@ function ContentEditPage({
           maxHtmlImages: savedGenerationOptions.maxHtmlImages,
           htmlImageTypes: savedGenerationOptions.htmlImageTypes,
           tableRequirement: savedGenerationOptions.tableRequirement,
+          technicalDeviationTableMode: savedGenerationOptions.technicalDeviationTableMode,
           enableConsistencyAudit: savedGenerationOptions.enableConsistencyAudit,
           consistencyRepairMode: savedGenerationOptions.consistencyRepairMode,
           enableOriginalPlanCoverageAudit: isExpansionWorkflow && savedGenerationOptions.enableOriginalPlanCoverageAudit,
@@ -1263,6 +1277,19 @@ function ContentEditPage({
                     onChange={(event) => setDraftGenerationOptions((prev) => ({ ...prev, tableRequirement: event.target.value as ContentTableRequirement }))}
                   >
                     {tableRequirementOptions.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
+                  </select>
+                </label>
+                <label className="content-generation-config-row">
+                  <span>
+                    <strong>技术偏离表格式</strong>
+                    <small>优先原表时会自动查找招标文件中的技术偏离表；未找到则使用标准表格。</small>
+                  </span>
+                  <select
+                    value={draftGenerationOptions.technicalDeviationTableMode}
+                    disabled={generationStrategyLocked}
+                    onChange={(event) => setDraftGenerationOptions((prev) => ({ ...prev, technicalDeviationTableMode: event.target.value as TechnicalDeviationTableMode }))}
+                  >
+                    {technicalDeviationTableModeOptions.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
                   </select>
                 </label>
               </div>

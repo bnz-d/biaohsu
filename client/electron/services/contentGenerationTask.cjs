@@ -19,6 +19,11 @@ const {
 const { applyRangeEdits, findTextMatches } = require('../utils/textEdit.cjs');
 const { splitUserTextByContextLimit } = require('../utils/userTextSplitter.cjs');
 const { countReadableWords } = require('../utils/wordCount.cjs');
+const {
+  isTechnicalDeviationTableContext,
+  normalizeTechnicalDeviationTableMode,
+  resolveTechnicalDeviationTableContext,
+} = require('./technicalDeviationTable.cjs');
 
 const DEFAULT_CONTEXT_LENGTH_LIMIT = 400000;
 const AGENT_CONTEXT_THRESHOLD_RATIO = 0.7;
@@ -790,13 +795,15 @@ function renderKnowledgeItemsForPrompt(items) {
   })).filter((item) => item.id && item.title && item.resume), null, 2);
 }
 
-function buildChapterContentPlanMessages({ chapter, parentChapters, siblingChapters, projectOverview, bidAnalysisFactsText, globalFactTitlesText, regenerateRequirement, tableRequirement, maxTables, tableTotalSections, knowledgeItems }) {
+function buildChapterContentPlanMessages({ chapter, parentChapters, siblingChapters, projectOverview, bidAnalysisFactsText, globalFactTitlesText, regenerateRequirement, tableRequirement, maxTables, tableTotalSections, knowledgeItems, forceTechnicalDeviationTable }) {
   const chapterId = chapter.id || 'unknown';
   const chapterTitle = chapter.title || '未命名章节';
   const chapterDescription = chapter.description || '';
   const tableRequirementLabel = TABLE_REQUIREMENT_LABELS[tableRequirement] || TABLE_REQUIREMENT_LABELS.heavy;
-  const tablePlanningAllowed = tableRequirement !== 'none';
-  const tableLimitInstruction = tableRequirement === 'heavy'
+  const tablePlanningAllowed = tableRequirement !== 'none' || forceTechnicalDeviationTable;
+  const tableLimitInstruction = forceTechnicalDeviationTable
+    ? '当前章节是技术偏离表，table.needed 必须为 true，不受全文普通表格数量限制。'
+    : tableRequirement === 'heavy'
     ? '表格需求为“大量”，保持现有编排逻辑；仍然只有明显适合表格的小节才将 table.needed 设为 true。'
     : tableRequirement === 'none'
       ? '表格需求为“不要”，table.needed 必须为 false，table.purpose 留空。'
@@ -885,11 +892,11 @@ function formatKnowledgeContentsForPrompt(contents) {
     .join('\n\n');
 }
 
-function buildChapterContentMessages({ chapter, projectOverview, selectedFactsText, regenerateRequirement, contentPlan, knowledgeContents, preSectionInstruction, wordControl, generationTarget = 0, globalFactsMode }) {
+function buildChapterContentMessages({ chapter, projectOverview, selectedFactsText, regenerateRequirement, contentPlan, knowledgeContents, preSectionInstruction, wordControl, generationTarget = 0, globalFactsMode, technicalDeviationTableInstruction }) {
   const chapterId = chapter.id || 'unknown';
   const chapterTitle = chapter.title || '未命名章节';
   const chapterDescription = chapter.description || '';
-  const tableAllowed = Boolean(contentPlan?.table?.needed);
+  const tableAllowed = Boolean(contentPlan?.table?.needed) || Boolean(technicalDeviationTableInstruction);
   const messages = [
     {
       role: 'system',
@@ -920,6 +927,9 @@ function buildChapterContentMessages({ chapter, projectOverview, selectedFactsTe
   }
   if (String(preSectionInstruction || '').trim()) {
     messages.push({ role: 'user', content: String(preSectionInstruction || '').trim() });
+  }
+  if (String(technicalDeviationTableInstruction || '').trim()) {
+    messages.push({ role: 'user', content: String(technicalDeviationTableInstruction).trim() });
   }
   appendSelectedFactsMessage(messages, selectedFactsText);
 
@@ -961,12 +971,12 @@ function buildChapterContentMessages({ chapter, projectOverview, selectedFactsTe
 直接返回编写的正文内容，不要输出标题、Markdown 标题、带任何形式编号的加粗引导语、伪目录标题、解释、总结等任何其他内容`,
   });
   const sectionWordRequirement = buildSectionWordRequirement(wordControl, false, generationTarget);
-  if (sectionWordRequirement) messages.push({ role: 'user', content: sectionWordRequirement });
+  if (sectionWordRequirement && !technicalDeviationTableInstruction) messages.push({ role: 'user', content: sectionWordRequirement });
 
   return messages;
 }
 
-function buildRestoredChapterContentMessages({ chapter, projectOverview, selectedFactsText, regenerateRequirement, contentPlan, knowledgeContents, restoredContent, wordControl, generationTarget = 0, globalFactsMode }) {
+function buildRestoredChapterContentMessages({ chapter, projectOverview, selectedFactsText, regenerateRequirement, contentPlan, knowledgeContents, restoredContent, wordControl, generationTarget = 0, globalFactsMode, technicalDeviationTableInstruction }) {
   const messages = buildChapterContentMessages({
     chapter,
     projectOverview,
@@ -976,6 +986,7 @@ function buildRestoredChapterContentMessages({ chapter, projectOverview, selecte
     knowledgeContents,
     wordControl: { ...wordControl, minimumWords: 0, maximumWords: 0, sectionWords: 0, strictSectionWords: false },
     globalFactsMode,
+    technicalDeviationTableInstruction,
     preSectionInstruction: `当前章节已经从用户原方案中还原出正文底稿。该底稿是用户已经写好的真实技术方案内容，必须作为本章节的基础保留。
 
 处理要求：
@@ -1002,7 +1013,7 @@ ${String(restoredContent || '').trim()}`,
     content: '请基于已还原正文底稿输出当前章节完整正文。必须保留底稿中的实质内容，可以优化扩写，但不要从零重写；如果底稿开头或中间出现章节标题、Markdown 标题或编号标题，只把它当作定位线索，不要输出这些标题或解释。',
   });
   const sectionWordRequirement = buildSectionWordRequirement(wordControl, true, generationTarget);
-  if (sectionWordRequirement) messages.push({ role: 'user', content: sectionWordRequirement });
+  if (sectionWordRequirement && !technicalDeviationTableInstruction) messages.push({ role: 'user', content: sectionWordRequirement });
   return messages;
 }
 
@@ -1191,7 +1202,7 @@ workspace 文件：
 最终请把当前小节完整正文写入 optimized-section.md。该文件只能包含正文内容，不要包含标题或说明。`, globalFactsMode);
 }
 
-function buildAgentRestoredChapterContentFiles({ chapter, projectOverview, selectedFactsText, regenerateRequirement, contentPlan, knowledgeContents, restoredContent, wordControl, generationTarget = 0 }) {
+function buildAgentRestoredChapterContentFiles({ chapter, projectOverview, selectedFactsText, regenerateRequirement, contentPlan, knowledgeContents, restoredContent, wordControl, generationTarget = 0, technicalDeviationTableInstruction }) {
   return [
     {
       path: 'chapter-context.md',
@@ -1214,8 +1225,11 @@ ${String(regenerateRequirement || '').trim() || '无'}
 # 正文编排决策
 ${contentPlan ? formatContentPlanForPrompt(contentPlan) : '无'}
 
+# 技术偏离表强制要求
+${String(technicalDeviationTableInstruction || '').trim() || '无'}
+
 # 本小节字数目标
-${buildSectionWordRequirement(wordControl, true, generationTarget) || '不控制小节字数'}`,
+${technicalDeviationTableInstruction ? '技术偏离表按招标要求完整填写，不执行普通小节字数控制' : buildSectionWordRequirement(wordControl, true, generationTarget) || '不控制小节字数'}`,
     },
     {
       path: 'restored-content.md',
@@ -2995,6 +3009,34 @@ async function runContentGenerationTask({ aiService, agentService, workspaceStor
   const imageConcurrency = normalizeImageConcurrency(aiConfig.image_model?.concurrency_limit);
   const developerModeEnabled = isDeveloperModeEnabled(aiService);
   const tableRequirement = normalizeTableRequirement(generationOptions.tableRequirement ?? generationOptions.table_requirement);
+  const technicalDeviationTableMode = normalizeTechnicalDeviationTableMode(
+    generationOptions.technicalDeviationTableMode ?? generationOptions.technical_deviation_table_mode,
+  );
+  const technicalDeviationLeafIds = new Set(leaves
+    .filter(({ item, parentChapters }) => isTechnicalDeviationTableContext(item, parentChapters))
+    .map(({ item }) => item.id));
+  const responseFileRequirements = formatBidAnalysisFactForPrompt(
+    storedPlan,
+    'responseFileRequirements',
+    '响应文件格式与偏离表要求',
+  );
+  let technicalDeviationTableContext = null;
+  if (technicalDeviationLeafIds.size) {
+    let tenderMarkdown = '';
+    if (technicalDeviationTableMode === 'source-first') {
+      try {
+        tenderMarkdown = workspaceStore.readTenderMarkdown?.() || '';
+      } catch {
+        tenderMarkdown = '';
+      }
+    }
+    technicalDeviationTableContext = resolveTechnicalDeviationTableContext({
+      mode: technicalDeviationTableMode,
+      tenderMarkdown,
+      responseFileRequirements,
+      techRequirements,
+    });
+  }
   let maxTables = maxTablesForRequirement(tableRequirement, leaves.length);
   const referenceKnowledgeDocumentIds = normalizeReferenceDocumentIds(storedPlan);
   const enableConsistencyAudit = Boolean(generationOptions.enableConsistencyAudit ?? generationOptions.enable_consistency_audit ?? true);
@@ -3202,6 +3244,13 @@ async function runContentGenerationTask({ aiService, agentService, workspaceStor
   if (wordControl.minimumWords > 0 || wordControl.maximumWords > 0 || wordControl.sectionWords > 0) {
     logs = [...logs, `目录生效字数配置：最少 ${wordControl.minimumWords || '不限制'} 字，最多 ${wordControl.maximumWords || '不限制'} 字，每小节 ${wordControl.sectionWords || '不控制'} 字。`];
   }
+  if (technicalDeviationTableContext) {
+    logs = [...logs, technicalDeviationTableContext.modeUsed === 'source'
+      ? '技术偏离表：已从招标文件识别原表，将按原表格式填写（' + technicalDeviationLeafIds.size + ' 个相关小节）。'
+      : technicalDeviationTableContext.fallback
+        ? '技术偏离表：未在招标文件中识别到可靠原表，已自动改用系统标准表格。'
+        : '技术偏离表：按用户设置使用系统标准表格。'];
+  }
   logs = [...logs, enableConsistencyAudit
     ? `全文一致性审计已启用，正文扩写完成后将使用${consistencyRepairMode === 'agent' ? ' Agent 修复' : '普通修复'}检查并修复事实冲突。`
     : '全文一致性审计未启用。'];
@@ -3265,6 +3314,9 @@ async function runContentGenerationTask({ aiService, agentService, workspaceStor
       task_count: tasksToRun.length,
       text_concurrency_limit: contentConcurrency,
       table_requirement: tableRequirement,
+      technical_deviation_table_mode: technicalDeviationTableMode,
+      technical_deviation_table_mode_used: technicalDeviationTableContext?.modeUsed || '',
+      technical_deviation_source_score: technicalDeviationTableContext?.source?.score || 0,
       word_control: wordControl,
       enable_consistency_audit: enableConsistencyAudit,
       requested_consistency_repair_mode: requestedConsistencyRepairMode,
@@ -3744,8 +3796,19 @@ async function runContentGenerationTask({ aiService, agentService, workspaceStor
     return normalizeStoredContentPlan(storedContentPlans[itemId]);
   }
 
-  function applyCurrentTableRequirementToPlan(plan) {
+  function applyCurrentTableRequirementToPlan(plan, itemId) {
     const normalizedPlan = normalizeContentPlan(plan, allowedKnowledgeItemIds, allowedFactTitles);
+    if (technicalDeviationLeafIds.has(itemId)) {
+      return {
+        ...normalizedPlan,
+        table: {
+          needed: true,
+          purpose: technicalDeviationTableContext?.modeUsed === 'source'
+            ? '严格按招标文件原技术偏离表填写'
+            : '按系统标准技术偏离表逐项响应',
+        },
+      };
+    }
     return tableRequirement === 'none' ? clearContentPlanTable(normalizedPlan) : normalizedPlan;
   }
 
@@ -3756,7 +3819,7 @@ async function runContentGenerationTask({ aiService, agentService, workspaceStor
     }
     return {
       ...storedContentPlan,
-      plan: applyCurrentTableRequirementToPlan(storedContentPlan.plan),
+      plan: applyCurrentTableRequirementToPlan(storedContentPlan.plan, itemId),
     };
   }
 
@@ -3911,6 +3974,7 @@ async function runContentGenerationTask({ aiService, agentService, workspaceStor
           maxTables,
           tableTotalSections: leaves.length,
           knowledgeItems,
+          forceTechnicalDeviationTable: technicalDeviationLeafIds.has(item.id),
         }),
         logTitle: `正文编排-${item.id}-${item.title || '未命名章节'}`,
         progressLabel: '正文编排决策',
@@ -3926,7 +3990,17 @@ async function runContentGenerationTask({ aiService, agentService, workspaceStor
       logs = [...logs, `编排失败：${item.id} ${item.title || '未命名章节'}，${error.message || '模型返回无效'}，将按纯正文生成。`];
     }
 
-    if (tableRequirement === 'none') {
+    if (technicalDeviationLeafIds.has(item.id)) {
+      contentPlan = {
+        ...contentPlan,
+        table: {
+          needed: true,
+          purpose: technicalDeviationTableContext?.modeUsed === 'source'
+            ? '严格按招标文件原技术偏离表填写'
+            : '按系统标准技术偏离表逐项响应',
+        },
+      };
+    } else if (tableRequirement === 'none') {
       contentPlan = clearContentPlanTable(contentPlan);
     }
     if (preservedOriginalMaterial?.restored || preservedOriginalMaterial?.source_ids?.length) {
@@ -3990,9 +4064,12 @@ async function runContentGenerationTask({ aiService, agentService, workspaceStor
     const selectedTableIds = runLimits.maxTablesForRun === null
       ? new Set(tableCandidates.map(({ item }) => item.id))
       : pickDistributedTableTargets(tableCandidates, runLimits.maxTablesForRun);
+    for (const itemId of technicalDeviationLeafIds) {
+      selectedTableIds.add(itemId);
+    }
     if (runLimits.maxTablesForRun !== null) {
       for (const { item } of tableCandidates) {
-        if (!selectedTableIds.has(item.id)) {
+        if (!selectedTableIds.has(item.id) && !technicalDeviationLeafIds.has(item.id)) {
           contentPlans.set(item.id, clearContentPlanTable(contentPlans.get(item.id)));
         }
       }
@@ -4217,9 +4294,12 @@ async function runContentGenerationTask({ aiService, agentService, workspaceStor
       const knowledgeContents = resolveKnowledgeContents(contentPlan.knowledge?.item_ids, knowledgeContentMap);
       const selectedFactsText = resolveSelectedFactsText(contentPlan, globalFacts);
       const generationTarget = computeGenerationWordTarget(wordControl, leaves.length);
+      const technicalDeviationTableInstruction = technicalDeviationLeafIds.has(item.id)
+        ? technicalDeviationTableContext?.instruction || ''
+        : '';
       const contentMessages = needsRestoredOptimization
-        ? buildRestoredChapterContentMessages({ chapter: item, projectOverview, selectedFactsText, regenerateRequirement, contentPlan, knowledgeContents, restoredContent: previousContent, wordControl, generationTarget, globalFactsMode })
-        : buildChapterContentMessages({ chapter: item, projectOverview, selectedFactsText, regenerateRequirement, contentPlan, knowledgeContents, wordControl, generationTarget, globalFactsMode });
+        ? buildRestoredChapterContentMessages({ chapter: item, projectOverview, selectedFactsText, regenerateRequirement, contentPlan, knowledgeContents, restoredContent: previousContent, wordControl, generationTarget, globalFactsMode, technicalDeviationTableInstruction })
+        : buildChapterContentMessages({ chapter: item, projectOverview, selectedFactsText, regenerateRequirement, contentPlan, knowledgeContents, wordControl, generationTarget, globalFactsMode, technicalDeviationTableInstruction });
 
       let generatedContent;
       if (needsRestoredOptimization && shouldUseAgentForMessages(aiService, contentMessages)) {
@@ -4250,6 +4330,7 @@ async function runContentGenerationTask({ aiService, agentService, workspaceStor
             restoredContent: previousContent,
             wordControl,
             generationTarget,
+            technicalDeviationTableInstruction,
           }),
           eventPrefix: 'restored_optimization.agent',
           activityLabel: 'Agent 正在优化扩写已还原正文',
@@ -4509,7 +4590,11 @@ async function runContentGenerationTask({ aiService, agentService, workspaceStor
 
   async function runSectionWordAdjustments(targets, stage) {
     if (!wordControl.strictSectionWords) return [];
-    const candidates = (targets || []).filter(({ item }) => sections[item.id]?.status === 'success' && getLeafWordCount(item) > 0);
+    const candidates = (targets || []).filter(({ item }) => (
+      !technicalDeviationLeafIds.has(item.id)
+      && sections[item.id]?.status === 'success'
+      && getLeafWordCount(item) > 0
+    ));
     const violations = candidates.filter(({ item }) => isSectionWordsOutsideRange(getLeafWordCount(item)));
     const resumingStage = resume && contentRuntime.word_adjustment_stage === stage;
     const completedItemIds = resumingStage ? [...contentRuntime.word_adjustment_completed_item_ids] : [];
@@ -4694,6 +4779,7 @@ async function runContentGenerationTask({ aiService, agentService, workspaceStor
       // 本轮单节平均预算，用于缩写时过滤可缩空间过小的小节，避免它们占用批次名额却几乎缩不动。
       const averageBudget = Math.abs(direction.currentWords - direction.targetWords) / TOTAL_WORD_ADJUSTMENT_BATCH_SIZE;
       let candidates = leafWordStats().filter(({ item, words }) => {
+        if (technicalDeviationLeafIds.has(item.id)) return false;
         if (sections[item.id]?.status !== 'success' || words <= 0) return false;
         if (completedItemIdSet.has(item.id)) return false;
         if (!wordControl.strictSectionWords) return true;
@@ -6046,6 +6132,7 @@ workspace 文件说明：
     const normalizedTargetId = String(cleanupTargetItemId || '').trim();
     return leaves
       .filter(({ item }) => !normalizedTargetId || item.id === normalizedTargetId)
+      .filter(({ item }) => !technicalDeviationLeafIds.has(item.id))
       .map((context) => {
         const content = getCurrentSuccessfulContent(context.item);
         return {
@@ -6600,7 +6687,7 @@ workspace 文件说明：
       }
       pauseIfRequested('正文生成已在去表格阶段暂停，可导出当前已完成内容，稍后继续。');
       const unresolvedSections = completedStages.has('final-section-word-adjusting')
-        ? leaves.filter(({ item }) => sections[item.id]?.status === 'success' && isSectionWordsOutsideRange(getLeafWordCount(item))).map(({ item }) => item.id)
+        ? leaves.filter(({ item }) => !technicalDeviationLeafIds.has(item.id) && sections[item.id]?.status === 'success' && isSectionWordsOutsideRange(getLeafWordCount(item))).map(({ item }) => item.id)
         : await runSectionWordAdjustments(leaves, 'final-section');
       markStageCompleted('final-section-word-adjusting');
       if (!completedStages.has('total-word-adjusting')) {
@@ -6608,7 +6695,7 @@ workspace 文件说明：
         markStageCompleted('total-word-adjusting');
       }
       const postAdjustmentSectionViolations = wordControl.strictSectionWords
-        ? leaves.filter(({ item }) => sections[item.id]?.status === 'success' && isSectionWordsOutsideRange(getLeafWordCount(item)))
+        ? leaves.filter(({ item }) => !technicalDeviationLeafIds.has(item.id) && sections[item.id]?.status === 'success' && isSectionWordsOutsideRange(getLeafWordCount(item)))
         : [];
       if (unresolvedSections.length && !postAdjustmentSectionViolations.length) {
         logs = [...logs, '全文调整已同时修复此前未达标的小节字数。'];
@@ -6629,7 +6716,7 @@ workspace 文件说明：
       }
       pauseIfRequested('正文生成已在去表格阶段暂停，可导出当前已完成内容，稍后继续。');
       const targetContext = leaves.find(({ item }) => item.id === targetItemId);
-      if (targetContext && wordControl.strictSectionWords && !completedStages.has('section-word-adjusting')) {
+      if (targetContext && !technicalDeviationLeafIds.has(targetContext.item.id) && wordControl.strictSectionWords && !completedStages.has('section-word-adjusting')) {
         contentStats.phase = 'section-word-adjusting';
         contentStats.section_adjustment_total = 1;
         contentStats.section_adjustment_completed = 0;
@@ -6691,7 +6778,7 @@ workspace 文件说明：
     }
     rebuildContentWordCounts();
     const finalSectionViolations = wordControl.strictSectionWords
-      ? statusLeaves.filter(({ item }) => sections[item.id]?.status === 'success' && isSectionWordsOutsideRange(getLeafWordCount(item)))
+      ? statusLeaves.filter(({ item }) => !technicalDeviationLeafIds.has(item.id) && sections[item.id]?.status === 'success' && isSectionWordsOutsideRange(getLeafWordCount(item)))
       : [];
     const finalTotalDirection = targetItemId ? null : getTotalWordDirection();
     contentStats.word_control_warning = finalSectionViolations.length || finalTotalDirection
