@@ -94,7 +94,7 @@ function createAiRequestQueue(options = {}) {
     }
   }
 
-  function scheduleRetry(job) {
+  function scheduleRetry(job, error) {
     job.state = 'retrying';
     retryingJobs.add(job);
     job.retryTimer = setTimeout(() => {
@@ -105,7 +105,7 @@ function createAiRequestQueue(options = {}) {
         queue.push(job);
         pump();
       }
-    }, getAiRetryDelayMs(job.attempts - 1));
+    }, getAiRetryDelayMs(job.attempts - 1, error));
   }
 
   async function runJob(job) {
@@ -121,7 +121,7 @@ function createAiRequestQueue(options = {}) {
         settleJob(job, 'reject', job.signal.reason || error);
       } else if (isRetryableAiRequestError(error) && job.attempts < job.maxAttempts) {
         job.attempts += 1;
-        scheduleRetry(job);
+        scheduleRetry(job, error);
       } else {
         settleJob(job, 'reject', error);
       }

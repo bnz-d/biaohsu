@@ -1,6 +1,6 @@
 const SOURCE_CONTEXT_CHARS = 700;
 const MAX_SOURCE_TABLE_CHARS = 60000;
-const MAX_REFERENCE_CHARS = 30000;
+const MAX_REFERENCE_CHARS = 12000;
 
 const EXACT_TITLES = [
   '技术偏离表',
@@ -125,15 +125,30 @@ function truncateReference(value) {
   return text.length > MAX_REFERENCE_CHARS ? text.slice(0, MAX_REFERENCE_CHARS) + '\n（参考内容过长，已截断）' : text;
 }
 
-function buildSourceInstruction(source, responseFileRequirements) {
+function normalizeResponsePrefix(value) {
+  return String(value || '').replace(/[\r\n|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200) || '满足，我司产品';
+}
+
+function buildResponseRules(responsePrefix) {
+  const prefix = normalizeResponsePrefix(responsePrefix);
+  return [
+    `每一行默认按完全满足响应，“投标响应/响应内容”必须以“${prefix}”开头。`,
+    '开头之后必须紧扣该行招标技术要求，逐项复述为我方承诺或说明；不得只写“满足”或使用与本行无关的通用话术。',
+    '“偏离情况”统一填写“无偏离”；“偏离说明”统一填写“完全满足招标要求”。',
+    '如果原表把响应和偏离合并在一列，则在该列依次写明响应内容和“无偏离”；不得遗漏任何已有行。',
+  ];
+}
+
+function buildSourceInstruction(source, responseFileRequirements, responsePrefix) {
   return [
     '本章是技术偏离表，系统已从招标文件中识别到原表。',
     '',
     '必须遵守：',
     '1. 优先使用下方招标文件原表，不得改动表名含义、表头、列顺序和已有行顺序。',
     '2. 把招标技术要求原文保留在对应行，在“投标响应/响应内容”和“偏离情况/偏离说明”等可填列中逐项填写。',
-    '3. 没有证据支持的响应参数、型号、证书或偏离结论一律写【待填写】，不得虚构“无偏离”或“正偏离”。',
-    '4. 输出 Markdown 表格，只输出表格本身；不输出章节标题、表前说明、表后总结。',
+    ...buildResponseRules(responsePrefix).map((rule, index) => `${index + 3}. ${rule}`),
+    '7. 不得编造招标文件未要求的品牌、型号、参数或证书；需要具体值但资料未提供时，只承诺满足该项招标要求，不擅自增加数值。',
+    '8. 输出 Markdown 表格，只输出表格本身；不输出章节标题、表前说明、表后总结。',
     '',
     '招标文件中识别的原表（' + (source.type === 'html' ? 'HTML 原表，请等价转为 Markdown 表格' : 'Markdown 原表') + '）：',
     source.table,
@@ -146,7 +161,7 @@ function buildSourceInstruction(source, responseFileRequirements) {
   ].join('\n');
 }
 
-function buildStandardInstruction(techRequirements, responseFileRequirements) {
+function buildStandardInstruction(techRequirements, responseFileRequirements, responsePrefix) {
   return [
     '本章是技术偏离表。本次使用系统标准表格，表头必须严格为：',
     '| 序号 | 招标文件条款号 | 招标文件技术要求/参数 | 投标响应 | 偏离情况 | 偏离说明 |',
@@ -154,8 +169,9 @@ function buildStandardInstruction(techRequirements, responseFileRequirements) {
     '',
     '必须遵守：',
     '1. 从下方技术要求中逐项拆分填行，保留条款号和要求原意，不得遗漏实质性要求。',
-    '2. 没有证据支持的投标响应、参数和偏离结论一律写【待填写】，不得虚构“无偏离”。',
-    '3. 只输出一个 Markdown 表格，不输出章节标题、表前说明、表后总结。',
+    ...buildResponseRules(responsePrefix).map((rule, index) => `${index + 2}. ${rule}`),
+    '6. 不得编造招标文件未要求的品牌、型号、参数或证书；需要具体值但资料未提供时，只承诺满足该项招标要求，不擅自增加数值。',
+    '7. 只输出一个 Markdown 表格，不输出章节标题、表前说明、表后总结。',
     '',
     '招标文件技术要求：',
     truncateReference(techRequirements) || '未提供，请保留一行【待填写】供用户补充',
@@ -165,18 +181,18 @@ function buildStandardInstruction(techRequirements, responseFileRequirements) {
   ].join('\n');
 }
 
-function resolveTechnicalDeviationTableContext({ mode, tenderMarkdown, responseFileRequirements, techRequirements }) {
+function resolveTechnicalDeviationTableContext({ mode, tenderMarkdown, responseFileRequirements, techRequirements, responsePrefix }) {
   const requestedMode = normalizeTechnicalDeviationTableMode(mode);
   const source = requestedMode === 'source-first' ? findTechnicalDeviationTable(tenderMarkdown) : null;
   if (source) {
-    return { requestedMode, modeUsed: 'source', source, instruction: buildSourceInstruction(source, responseFileRequirements) };
+    return { requestedMode, modeUsed: 'source', source, instruction: buildSourceInstruction(source, responseFileRequirements, responsePrefix) };
   }
   return {
     requestedMode,
     modeUsed: 'standard',
     source: null,
     fallback: requestedMode === 'source-first',
-    instruction: buildStandardInstruction(techRequirements, responseFileRequirements),
+    instruction: buildStandardInstruction(techRequirements, responseFileRequirements, responsePrefix),
   };
 }
 

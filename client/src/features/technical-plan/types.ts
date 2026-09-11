@@ -57,6 +57,7 @@ export interface ContentGenerationOptions {
   htmlImageTypes: string;
   tableRequirement: ContentTableRequirement;
   technicalDeviationTableMode: TechnicalDeviationTableMode;
+  technicalDeviationResponsePrefix: string;
   enableConsistencyAudit: boolean;
   consistencyRepairMode: ConsistencyRepairMode;
   enableOriginalPlanCoverageAudit: boolean;

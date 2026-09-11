@@ -1,5 +1,6 @@
 const AI_REQUEST_MAX_ATTEMPTS = 3;
 const AI_RETRY_DELAY_MS_BY_FAILED_ATTEMPT = [3000, 5000];
+const AI_RATE_LIMIT_RETRY_DELAY_MS_BY_FAILED_ATTEMPT = [20000, 45000];
 
 const RETRYABLE_HTTP_STATUS_CODES = new Set([408, 429]);
 const RETRYABLE_NETWORK_ERROR_CODES = new Set([
@@ -121,6 +122,11 @@ function isRetryableAiRequestError(error) {
     return false;
   }
 
+  // 部分兼容代理会把上游 429 包装成 HTTP 400，只能从错误正文识别真实的 TPM 限流。
+  if (isRateLimitError(error)) {
+    return true;
+  }
+
   if (error.aiRequestRetryable === false) {
     return false;
   }
@@ -141,10 +147,18 @@ function isRetryableAiRequestError(error) {
   return hasRetryableNetworkCode(error) || isFetchNetworkError(error);
 }
 
-function getAiRetryDelayMs(failedAttempt) {
+function isRateLimitError(error) {
+  if (getErrorStatus(error) === 429) return true;
+  return walkErrorChain(error, (item) => /(?:rate\s*limit|tpm\s*limit|request rate exceeds|too many requests)/i.test(String(item?.message || '')));
+}
+
+function getAiRetryDelayMs(failedAttempt, error) {
   const attempt = Math.max(1, Number(failedAttempt) || 1);
-  return AI_RETRY_DELAY_MS_BY_FAILED_ATTEMPT[
-    Math.min(attempt, AI_RETRY_DELAY_MS_BY_FAILED_ATTEMPT.length) - 1
+  const delays = isRateLimitError(error)
+    ? AI_RATE_LIMIT_RETRY_DELAY_MS_BY_FAILED_ATTEMPT
+    : AI_RETRY_DELAY_MS_BY_FAILED_ATTEMPT;
+  return delays[
+    Math.min(attempt, delays.length) - 1
   ];
 }
 
@@ -204,7 +218,7 @@ async function runWithAiRetry(runner, options = {}) {
       await Promise.resolve(options.onRetry?.({ error, attempt, nextAttempt: attempt + 1, maxAttempts }));
       const delayMs = typeof options.getDelayMs === 'function'
         ? options.getDelayMs({ error, attempt, nextAttempt: attempt + 1, maxAttempts })
-        : getAiRetryDelayMs(attempt);
+        : getAiRetryDelayMs(attempt, error);
       await delay(delayMs, options.signal);
     }
   }

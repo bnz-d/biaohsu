@@ -2996,7 +2996,8 @@ async function runContentGenerationTask({ aiService, agentService, workspaceStor
   }
 
   let leaves = collectLeafContexts(outlineData.outline)
-    .filter(({ item }) => item?.content_mode === 'ai-generate');
+    .filter(({ item, parentChapters }) => item?.content_mode === 'ai-generate'
+      || (item?.content_mode === 'point-to-point' && isTechnicalDeviationTableContext(item, parentChapters)));
   if (!leaves.length) {
     throw new Error('当前目录没有标记为“AI生成”的正文小节');
   }
@@ -3005,13 +3006,18 @@ async function runContentGenerationTask({ aiService, agentService, workspaceStor
     ? storedPlan.contentGenerationOptions || {}
     : payload.generationOptions || payload.generation_options || storedPlan.contentGenerationOptions || {};
   const aiConfig = aiService.getConfig ? aiService.getConfig() : {};
-  const contentConcurrency = normalizeContentConcurrency(aiConfig.concurrency_limit);
+  const configuredContentConcurrency = normalizeContentConcurrency(aiConfig.concurrency_limit);
   const imageConcurrency = normalizeImageConcurrency(aiConfig.image_model?.concurrency_limit);
   const developerModeEnabled = isDeveloperModeEnabled(aiService);
   const tableRequirement = normalizeTableRequirement(generationOptions.tableRequirement ?? generationOptions.table_requirement);
   const technicalDeviationTableMode = normalizeTechnicalDeviationTableMode(
     generationOptions.technicalDeviationTableMode ?? generationOptions.technical_deviation_table_mode,
   );
+  const technicalDeviationResponsePrefix = String(
+    generationOptions.technicalDeviationResponsePrefix
+      ?? generationOptions.technical_deviation_response_prefix
+      ?? '满足，我司产品',
+  ).replace(/[\r\n|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200) || '满足，我司产品';
   const technicalDeviationLeafIds = new Set(leaves
     .filter(({ item, parentChapters }) => isTechnicalDeviationTableContext(item, parentChapters))
     .map(({ item }) => item.id));
@@ -3035,8 +3041,13 @@ async function runContentGenerationTask({ aiService, agentService, workspaceStor
       tenderMarkdown,
       responseFileRequirements,
       techRequirements,
+      responsePrefix: technicalDeviationResponsePrefix,
     });
   }
+  // 偏离表会携带招标原表，单次输入显著大于普通章节。降低本轮并发，避免多个大请求同时触发服务商 TPM 限制。
+  const contentConcurrency = technicalDeviationTableContext
+    ? Math.min(configuredContentConcurrency, 2)
+    : configuredContentConcurrency;
   let maxTables = maxTablesForRequirement(tableRequirement, leaves.length);
   const referenceKnowledgeDocumentIds = normalizeReferenceDocumentIds(storedPlan);
   const enableConsistencyAudit = Boolean(generationOptions.enableConsistencyAudit ?? generationOptions.enable_consistency_audit ?? true);
@@ -3316,6 +3327,7 @@ async function runContentGenerationTask({ aiService, agentService, workspaceStor
       table_requirement: tableRequirement,
       technical_deviation_table_mode: technicalDeviationTableMode,
       technical_deviation_table_mode_used: technicalDeviationTableContext?.modeUsed || '',
+      technical_deviation_response_prefix: technicalDeviationResponsePrefix,
       technical_deviation_source_score: technicalDeviationTableContext?.source?.score || 0,
       word_control: wordControl,
       enable_consistency_audit: enableConsistencyAudit,

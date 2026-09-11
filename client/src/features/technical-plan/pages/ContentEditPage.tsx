@@ -119,6 +119,7 @@ const defaultContentGenerationOptions: ContentGenerationOptions = {
   htmlImageTypes: DEFAULT_HTML_IMAGE_TYPES,
   tableRequirement: 'heavy',
   technicalDeviationTableMode: 'source-first',
+  technicalDeviationResponsePrefix: '满足，我司产品',
   enableConsistencyAudit: true,
   consistencyRepairMode: 'agent',
   enableOriginalPlanCoverageAudit: false,
@@ -171,6 +172,7 @@ function normalizeGenerationOptions(options: ContentGenerationOptions | undefine
     htmlImageTypes: String(options?.htmlImageTypes ?? fallback.htmlImageTypes),
     tableRequirement: isContentTableRequirement(tableRequirement) ? tableRequirement : fallback.tableRequirement,
     technicalDeviationTableMode: isTechnicalDeviationTableMode(technicalDeviationTableMode) ? technicalDeviationTableMode : fallback.technicalDeviationTableMode,
+    technicalDeviationResponsePrefix: String(options?.technicalDeviationResponsePrefix ?? fallback.technicalDeviationResponsePrefix).trim().slice(0, 200) || fallback.technicalDeviationResponsePrefix,
     enableConsistencyAudit: Boolean(options?.enableConsistencyAudit ?? fallback.enableConsistencyAudit),
     consistencyRepairMode: isConsistencyRepairMode(options?.consistencyRepairMode) ? options.consistencyRepairMode : fallback.consistencyRepairMode,
     enableOriginalPlanCoverageAudit: isExpansionWorkflow ? Boolean(options?.enableOriginalPlanCoverageAudit ?? fallback.enableOriginalPlanCoverageAudit) : false,
@@ -180,6 +182,20 @@ function normalizeGenerationOptions(options: ContentGenerationOptions | undefine
 
 function collectLeafItems(items: OutlineItem[]): OutlineItem[] {
   return items.flatMap((item) => item.children?.length ? collectLeafItems(item.children) : [item]);
+}
+
+function isTechnicalDeviationTableItem(item: OutlineItem | null | undefined) {
+  const title = String(item?.title || '').replace(/\s+/g, ' ').trim();
+  return title.includes('技术偏离表')
+    || title.includes('技术规格偏离表')
+    || title.includes('技术参数偏离表')
+    || (title.includes('技术') && title.includes('偏离'))
+    || (title.includes('技术') && title.includes('响应') && title.includes('表'));
+}
+
+function isGeneratedContentItem(item: OutlineItem | null | undefined) {
+  return item?.content_mode === 'ai-generate'
+    || (item?.content_mode === 'point-to-point' && isTechnicalDeviationTableItem(item));
 }
 
 function findItem(items: OutlineItem[], id: string): OutlineItem | null {
@@ -217,7 +233,7 @@ function getLeafStatus(item: OutlineItem, sections: ContentGenerationSections): 
   }
 
   if (getLeafContent(item, sections).trim()) return 'success';
-  return item.content_mode === 'ai-generate' ? 'idle' : 'pending';
+  return isGeneratedContentItem(item) ? 'idle' : 'pending';
 }
 
 function getTreeStatus(item: OutlineItem, sections: ContentGenerationSections): TreeStatus {
@@ -265,7 +281,7 @@ function buildOutlineMeta(items: OutlineItem[], sections: ContentGenerationSecti
   function visit(item: OutlineItem): OutlineNodeMeta {
     if (!item.children?.length) {
       const baseStatus = getLeafStatus(item, sections);
-      const status: TreeStatus = planning && item.content_mode === 'ai-generate' && baseStatus === 'idle' ? 'planning' : baseStatus;
+      const status: TreeStatus = planning && isGeneratedContentItem(item) && baseStatus === 'idle' ? 'planning' : baseStatus;
       const nodeMeta: OutlineNodeMeta = { status, leafCount: 1, words: countWords(getLeafContent(item, sections)) };
       meta.set(item.id, nodeMeta);
       return nodeMeta;
@@ -312,7 +328,7 @@ function ContentEditPage({
   const { showToast } = useToast();
   const isExpansionWorkflow = workflowKind === 'existing-plan-expansion';
   const allLeaves = useMemo(() => outlineData?.outline ? collectLeafItems(outlineData.outline) : [], [outlineData]);
-  const leaves = useMemo(() => allLeaves.filter((item) => item.content_mode === 'ai-generate'), [allLeaves]);
+  const leaves = useMemo(() => allLeaves.filter(isGeneratedContentItem), [allLeaves]);
   const [selectedItemId, setSelectedItemId] = useState('');
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [isPreviewing, setIsPreviewing] = useState(false);
@@ -392,7 +408,8 @@ function ContentEditPage({
     if (item.content_mode) counts[item.content_mode] += 1;
     return counts;
   }, { 'ai-generate': 0, 'template-fill': 0, 'point-to-point': 0, other: 0 });
-  const pendingCount = modeCounts['template-fill'] + modeCounts['point-to-point'] + modeCounts.other;
+  const generatedPointToPointCount = allLeaves.filter((item) => item.content_mode === 'point-to-point' && isGeneratedContentItem(item)).length;
+  const pendingCount = allLeaves.filter((item) => !isGeneratedContentItem(item)).length;
   const progress = leaves.length ? Math.round((resolvedCount / leaves.length) * 100) : 0;
   const planningTotal = contentStats?.planning_total || leaves.length;
   const planningCompleted = contentStats?.planning_completed || 0;
@@ -844,6 +861,7 @@ function ContentEditPage({
         htmlImageTypes: savedGenerationOptions.htmlImageTypes,
         tableRequirement: savedGenerationOptions.tableRequirement,
         technicalDeviationTableMode: savedGenerationOptions.technicalDeviationTableMode,
+        technicalDeviationResponsePrefix: savedGenerationOptions.technicalDeviationResponsePrefix,
         enableConsistencyAudit: savedGenerationOptions.enableConsistencyAudit,
         consistencyRepairMode: savedGenerationOptions.consistencyRepairMode,
         enableOriginalPlanCoverageAudit: isExpansionWorkflow && savedGenerationOptions.enableOriginalPlanCoverageAudit,
@@ -915,6 +933,7 @@ function ContentEditPage({
           htmlImageTypes: savedGenerationOptions.htmlImageTypes,
           tableRequirement: savedGenerationOptions.tableRequirement,
           technicalDeviationTableMode: savedGenerationOptions.technicalDeviationTableMode,
+          technicalDeviationResponsePrefix: savedGenerationOptions.technicalDeviationResponsePrefix,
           enableConsistencyAudit: savedGenerationOptions.enableConsistencyAudit,
           consistencyRepairMode: savedGenerationOptions.consistencyRepairMode,
           enableOriginalPlanCoverageAudit: isExpansionWorkflow && savedGenerationOptions.enableOriginalPlanCoverageAudit,
@@ -996,28 +1015,37 @@ function ContentEditPage({
 
     return (
       <div className="content-outline-node" key={item.id} style={{ '--content-level': level } as CSSProperties}>
-        <button
-          type="button"
+        <div
+          role="button"
+          tabIndex={0}
           className={`content-outline-item is-${status}${selectedItemId === item.id ? ' is-active' : ''}`}
           onClick={() => setSelectedItemId(item.id)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              setSelectedItemId(item.id);
+            }
+          }}
         >
           <span className="content-outline-dot" aria-hidden="true" />
           <span className="content-outline-text">
             <strong>{formatOutlineTitle(item.id, item.title, exportFormat.headings[Math.min(item.id.split('.').length - 1, 5)])}</strong>
             <small>{isLeaf ? `${modeLabel || '未标记'} · ${statusLabels[status]} · ${words} 字` : `${statusLabels[status]} · ${leafCount} 个小节 · ${words} 字`}</small>
           </span>
-          {isLeaf && item.content_mode === 'ai-generate' && (status === 'success' || status === 'error') ? (
+          {isLeaf && isGeneratedContentItem(item) && (status === 'success' || status === 'error') ? (
             <Popover.Root
               open={confirmRegenerateItem?.id === item.id}
               onOpenChange={(open) => setConfirmRegenerateItem(open ? item : null)}
             >
               <Popover.Trigger asChild>
-                <em
-                  className="is-clickable"
+                <button
+                  type="button"
+                  className="content-outline-status is-clickable"
                   onClick={(event) => {
                     event.stopPropagation();
                   }}
-                >{statusLabels[status]}</em>
+                  aria-label={`重新生成 ${item.title || item.id}`}
+                >{statusLabels[status]}</button>
               </Popover.Trigger>
               <Popover.Portal>
                 <Popover.Content className="content-regenerate-popover" side="top" align="end" sideOffset={8}>
@@ -1043,7 +1071,7 @@ function ContentEditPage({
           ) : (
             <em>{statusLabels[status]}</em>
           )}
-        </button>
+        </div>
         {item.children?.length ? renderTree(item.children, level + 1) : null}
       </div>
     );
@@ -1066,13 +1094,13 @@ function ContentEditPage({
         <div>
           <span className="section-kicker">STEP 05</span>
           <strong>正文生成</strong>
-          <p>只对标记为“AI生成”的叶子小节生成正文，其他模式保留为待处理。</p>
+          <p>生成 AI 正文，并自动填写技术偏离表；其他特殊材料保留为待处理。</p>
         </div>
         <div className="content-generation-stats" aria-label="正文生成统计">
-          <span><strong>{leaves.length}</strong> 个 AI 小节</span>
+          <span><strong>{leaves.length}</strong> 个生成小节</span>
           <span><strong>{completedCount}</strong> 已生成</span>
           {ignoredCount > 0 && <span><strong>{ignoredCount}</strong> 已忽略</span>}
-          <span title={`模板填写 ${modeCounts['template-fill']}，点对点应答表 ${modeCounts['point-to-point']}，其他模式 ${modeCounts.other}`}><strong>{pendingCount}</strong> 待处理</span>
+          <span title={`模板填写 ${modeCounts['template-fill']}，待回填点对点应答表 ${Math.max(0, modeCounts['point-to-point'] - generatedPointToPointCount)}，其他模式 ${modeCounts.other}`}><strong>{pendingCount}</strong> 待处理</span>
           <span><strong>{totalWords}</strong> 字</span>
         </div>
         <div className="content-generation-actions">
@@ -1203,10 +1231,10 @@ function ContentEditPage({
                 ? sections[selectedItem.id]?.error || '正文生成失败'
                 : getLeafStatus(selectedItem, sections) === 'ignored'
                   ? '该小节已按用户选择忽略'
-                  : selectedItem.content_mode === 'ai-generate' ? '正文待生成' : '该小节等待后续处理'}</strong>
+                  : isGeneratedContentItem(selectedItem) ? '正文待生成' : '该小节等待后续处理'}</strong>
               <p>{getLeafStatus(selectedItem, sections) === 'ignored'
                 ? '该小节不参与一致性检查、字数调整和图片编排；如需补充，可直接编辑正文。'
-                : selectedItem.content_mode && selectedItem.content_mode !== 'ai-generate'
+                : selectedItem.content_mode && selectedItem.content_mode !== 'ai-generate' && !isGeneratedContentItem(selectedItem)
                 ? `${pendingModeDescriptions[selectedItem.content_mode]}${selectedItem.content_mode === 'other' && selectedItem.content_mode_note ? ` ${selectedItem.content_mode_note}` : ''}`
                 : taskInFlight ? '如果该小节正在生成，模型返回内容后会实时显示在这里。' : paused ? '任务已暂停，可先导出当前内容或点击继续。' : '点击生成正文后，后台会按 AI 生成小节生成内容。'}</p>
             </div>
@@ -1291,6 +1319,21 @@ function ContentEditPage({
                   >
                     {technicalDeviationTableModeOptions.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
                   </select>
+                </label>
+                <label className="content-generation-config-row">
+                  <span>
+                    <strong>偏离表响应开头</strong>
+                    <small>每条投标响应都以这段话开头，后面会对应本行招标要求逐项响应。</small>
+                  </span>
+                  <input
+                    type="text"
+                    className="technical-deviation-response-prefix"
+                    value={draftGenerationOptions.technicalDeviationResponsePrefix}
+                    disabled={generationStrategyLocked}
+                    maxLength={200}
+                    placeholder="例如：满足，我司产品"
+                    onChange={(event) => setDraftGenerationOptions((prev) => ({ ...prev, technicalDeviationResponsePrefix: event.target.value }))}
+                  />
                 </label>
               </div>
               <div className="content-generation-config-group">

@@ -39,6 +39,18 @@ test('标准模式不搜索原表', () => {
   assert.equal(normalizeTechnicalDeviationTableMode('unexpected'), 'source-first');
 });
 
+test('默认全部满足并使用用户自定义响应开头', () => {
+  const context = resolveTechnicalDeviationTableContext({
+    mode: 'standard',
+    techRequirements: 'CPU 不低于 8 核',
+    responsePrefix: '满足，我司产品承诺',
+  });
+  assert.match(context.instruction, /每一行默认按完全满足响应/);
+  assert.match(context.instruction, /满足，我司产品承诺/);
+  assert.match(context.instruction, /紧扣该行招标技术要求/);
+  assert.match(context.instruction, /“偏离情况”统一填写“无偏离”/);
+});
+
 test('根据当前或上级章节判断技术偏离表上下文', () => {
   assert.equal(isTechnicalDeviationTableContext({ title: '技术规格偏离表' }), true);
   assert.equal(isTechnicalDeviationTableContext({ title: '设备参数' }, [{ title: '技术响应表' }]), true);
